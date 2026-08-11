@@ -1,0 +1,76 @@
+name: Build image
+
+on:
+  workflow_dispatch:
+    inputs:
+      asobi_ref:
+        description: >-
+          Ref de widgrensit/asobi a construir (tag v0.73.9, SHA, o vacío para
+          usar la última release publicada).
+        required: false
+        default: ""
+        type: string
+      image_tag:
+        description: >-
+          Tag de la imagen a publicar. Vacío = tag del ref (o `latest`).
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_BASE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve Asobi ref
+        id: ref
+        run: |
+          set -eu
+          REF="${{ inputs.asobi_ref }}"
+          if [ -z "$REF" ]; then
+            # Sin ref: usar la última release publicada de widgrensit/asobi.
+            # No todos los commits tienen imagen oficial ni release, así que
+            # aquí se elige explícitamente el tag a construir.
+            REF=$(gh api repos/widgrensit/asobi/releases/latest --jq '.tag_name')
+          fi
+          echo "asobi_ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "Resolved asobi ref: $REF"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          build-args: |
+            ASOBI_REF=${{ steps.ref.outputs.asobi_ref }}
+          tags: |
+            ${{ env.IMAGE_BASE }}:${{ inputs.image_tag || steps.ref.outputs.asobi_ref }}
+            ${{ env.IMAGE_BASE }}:latest
+          push: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Summarize
+        run: |
+          echo "Imagen publicada:"
+          echo "  ghcr.io/${{ github.repository }}:${{ inputs.image_tag || steps.ref.outputs.asobi_ref }}"
+          echo "  ghcr.io/${{ github.repository }}:latest"
