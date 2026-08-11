@@ -5,17 +5,22 @@ on:
     inputs:
       asobi_ref:
         description: >-
-          Ref de widgrensit/asobi a construir (tag v0.73.9, SHA, o vacío para
+          Ref de widgrensit/asobi a construir (tag vX.Y.Z, SHA, o vacío para
           usar la última release publicada).
         required: false
         default: ""
         type: string
       image_tag:
         description: >-
-          Tag de la imagen a publicar. Vacío = tag del ref (o `latest`).
+          Tag de la imagen a publicar. Vacío = tag del ref.
         required: false
         default: ""
         type: string
+  push:
+    tags:
+      - "asobi-*"
+  schedule:
+    - cron: "0 */6 * * *"
 
 permissions:
   contents: read
@@ -28,22 +33,30 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Resolve Asobi ref
+      - name: Resolve asobi ref
         id: ref
         run: |
           set -eu
           REF="${{ inputs.asobi_ref }}"
-          if [ -z "$REF" ]; then
-            # Sin ref: usar la última release publicada de widgrensit/asobi.
-            # No todos los commits tienen imagen oficial ni release, así que
-            # aquí se elige explícitamente el tag a construir.
-            REF=$(gh api repos/widgrensit/asobi/releases/latest --jq '.tag_name')
+
+          # Push de tag asobi-* -> normalizar a vX.Y.Z
+          if [ "${{ github.event_name }}" = "push" ]; then
+            RAW="${GITHUB_REF_NAME#asobi-}"
+            case "$RAW" in
+              v*) REF="$RAW" ;;
+              *)  REF="v$RAW" ;;
+            esac
           fi
+
+          # Vacío (schedule o dispatch manual sin ref): última release publicada
+          if [ -z "$REF" ]; then
+            REF="$(gh api repos/widgrensit/asobi/releases/latest --jq .tag_name)"
+          fi
+
           echo "asobi_ref=$REF" >> "$GITHUB_OUTPUT"
           echo "Resolved asobi ref: $REF"
-
-      - name: Checkout
-        uses: actions/checkout@v4
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -52,25 +65,45 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Skip if tag already published (schedule)
+        id: skip
+        if: github.event_name == 'schedule'
+        run: |
+          set -eu
+          REF="${{ steps.ref.outputs.asobi_ref }}"
+          if docker manifest inspect "${{ env.IMAGE_BASE }}:$REF" >/dev/null 2>&1; then
+            echo "El tag $REF ya está publicado; saltando."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.skip.outputs.skip != 'true'
+        uses: actions/checkout@v4
+
       - name: Set up Docker Buildx
+        if: steps.skip.outputs.skip != 'true'
         uses: docker/setup-buildx-action@v3
 
       - name: Build and push
+        if: steps.skip.outputs.skip != 'true'
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
           build-args: |
             ASOBI_REF=${{ steps.ref.outputs.asobi_ref }}
+          push: true
           tags: |
             ${{ env.IMAGE_BASE }}:${{ inputs.image_tag || steps.ref.outputs.asobi_ref }}
             ${{ env.IMAGE_BASE }}:latest
-          push: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Summarize
+        if: steps.skip.outputs.skip != 'true'
         run: |
           echo "Imagen publicada:"
-          echo "  ghcr.io/${{ github.repository }}:${{ inputs.image_tag || steps.ref.outputs.asobi_ref }}"
-          echo "  ghcr.io/${{ github.repository }}:latest"
+          echo "  ${{ env.IMAGE_BASE }}:${{ inputs.image_tag || steps.ref.outputs.asobi_ref }}"
+          echo "  ${{ env.IMAGE_BASE }}:latest"
