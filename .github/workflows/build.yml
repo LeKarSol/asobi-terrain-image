@@ -26,9 +26,6 @@ permissions:
   contents: read
   packages: write
 
-env:
-  IMAGE_BASE: ghcr.io/${{ github.repository }}
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -53,7 +50,13 @@ jobs:
             REF="$(gh api repos/widgrensit/asobi/releases/latest --jq .tag_name)"
           fi
 
+          # GHCR exige nombres en minúsculas (github.repository puede traer el owner en mayúsculas)
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          REPO="${GITHUB_REPOSITORY#*/}"
+          IMAGE_BASE="ghcr.io/${OWNER}/${REPO,,}"
+
           echo "asobi_ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "image_base=$IMAGE_BASE" >> "$GITHUB_OUTPUT"
           echo "Resolved asobi ref: $REF"
         env:
           GH_TOKEN: ${{ github.token }}
@@ -71,7 +74,7 @@ jobs:
         run: |
           set -eu
           REF="${{ steps.ref.outputs.asobi_ref }}"
-          if docker manifest inspect "${{ env.IMAGE_BASE }}:$REF" >/dev/null 2>&1; then
+          if docker manifest inspect "${{ steps.ref.outputs.image_base }}:$REF" >/dev/null 2>&1; then
             echo "El tag $REF ya está publicado; saltando."
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
@@ -96,8 +99,8 @@ jobs:
             ASOBI_REF=${{ steps.ref.outputs.asobi_ref }}
           push: true
           tags: |
-            ${{ env.IMAGE_BASE }}:${{ inputs.image_tag || steps.ref.outputs.asobi_ref }}
-            ${{ env.IMAGE_BASE }}:latest
+            ${{ steps.ref.outputs.image_base }}:${{ inputs.image_tag || steps.ref.outputs.asobi_ref }}
+            ${{ steps.ref.outputs.image_base }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -105,5 +108,5 @@ jobs:
         if: steps.skip.outputs.skip != 'true'
         run: |
           echo "Imagen publicada:"
-          echo "  ${{ env.IMAGE_BASE }}:${{ inputs.image_tag || steps.ref.outputs.asobi_ref }}"
-          echo "  ${{ env.IMAGE_BASE }}:latest"
+          echo "  ${{ steps.ref.outputs.image_base }}:${{ inputs.image_tag || steps.ref.outputs.asobi_ref }}"
+          echo "  ${{ steps.ref.outputs.image_base }}:latest"
