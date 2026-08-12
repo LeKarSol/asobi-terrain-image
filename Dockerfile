@@ -28,6 +28,15 @@ WORKDIR /build
 RUN curl -fsSL https://github.com/erlang/rebar3/releases/download/3.27.0/rebar3 -o /usr/local/bin/rebar3 && \
     chmod +x /usr/local/bin/rebar3
 
+# Cache-bust selectivo: este archivo solo cambia cuando bump-version.sh
+# --force lo actualiza. En un push normal (misma ASOBI_REF, mismos
+# providers) el contenido es idéntico y Buildx reutiliza toda la cache
+# de aquí en adelante como siempre. Con --force el contenido cambia, lo
+# que invalida esta layer y TODAS las siguientes (clone, providers,
+# compile, release) sin tener que desactivar la cache del build entero
+# (que también invalidaría apt-get/rebar3 y sería mucho más lento).
+COPY .rebuild-trigger /tmp/.rebuild-trigger
+
 # Clonar el ref concreto (acepta tags vX.Y.Z o SHAs). Los providers se
 # copian ANTES de compilar el app para que queden dentro del release.
 RUN if git ls-remote --tags --exit-code ${ASOBI_REPO} ${ASOBI_REF} >/dev/null 2>&1; then \
