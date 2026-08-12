@@ -15,7 +15,7 @@
 # --- Builder: igual que el Dockerfile oficial -------------------------------
 FROM erlang:29.0.4-slim AS builder
 
-ARG ASOBI_REF=v0.75.2
+ARG ASOBI_REF=v0.76.0
 ARG ASOBI_REPO=https://github.com/widgrensit/asobi.git
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
