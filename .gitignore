@@ -1,0 +1,17 @@
+# Secretos / config local
+.env
+*.env
+docker-compose.yml
+download-docker-image.sh
+
+# Copias de imagen para compartir (pesadas)
+ghcr.io/
+*.tar.gz
+
+# Logs y temporales
+*.log
+
+# Editores / SO
+.DS_Store
+.idea/
+.vscode/

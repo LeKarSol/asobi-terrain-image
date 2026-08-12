@@ -5,11 +5,22 @@ set -euo pipefail
 #
 #  1. Comprueba que el tag v<VERSION> existe en widgrensit/asobi.
 #  2. Sube la versión por defecto en el Dockerfile.
+#  2b. Si --force, actualiza .rebuild-trigger (cache-bust selectivo).
 #  3. Commit + push.
 #  4. Push del tag asobi-v<VERSION> (dispara el workflow 'Build image').
 #
 # Uso:
-#   ./bump-version.sh [X.Y.Z]   (si no se pasa, usa la última release publicada)
+#   ./bump-version.sh [--force|-f] [X.Y.Z]
+#
+#   Sin argumento de versión: usa la última release publicada.
+#   --force / -f: si el tag asobi-v<VERSION> ya existe (local y/o remoto),
+#     lo borra y lo vuelve a crear apuntando al HEAD actual, para
+#     re-disparar el workflow 'Build image' sin tener que subir de
+#     versión. Además actualiza .rebuild-trigger para forzar un build
+#     de verdad (bypass de la cache de Buildx desde el clone en
+#     adelante) - sin esto, un --force con la misma ASOBI_REF y los
+#     mismos providers reutiliza toda la cache y no cambia ningún
+#     layer, aunque el workflow sí se re-ejecute.
 
 cd "$(dirname "$0")"
 
@@ -33,13 +44,35 @@ latest_release() {
         | head -1
 }
 
-VERSION="${1:-}"
+# --- parseo de argumentos --------------------------------------------------
+FORCE_TAG=false
+POSITIONAL=()
+for arg in "$@"; do
+    case "$arg" in
+        --force|-f)
+            FORCE_TAG=true
+            ;;
+        --help|-h)
+            echo "Uso: $0 [--force|-f] [X.Y.Z]"
+            exit 0
+            ;;
+        -*)
+            die "opción desconocida: $arg (usa --force/-f)"
+            ;;
+        *)
+            POSITIONAL+=("$arg")
+            ;;
+    esac
+done
+
+VERSION="${POSITIONAL[0]:-}"
 if [ -z "$VERSION" ]; then
     VERSION="$(latest_release)"
     echo "Sin argumento: usando la última release publicada ($VERSION)."
 fi
 
 echo "==> Versión objetivo: v$VERSION"
+[ "$FORCE_TAG" = true ] && echo "==> --force activo: se recreará el tag aunque ya exista."
 
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "versión inválida '$VERSION' (se espera X.Y.Z)"
 
@@ -57,22 +90,58 @@ else
     echo "==> Ya estaba en v$VERSION; sin cambios de versión."
 fi
 
+# --- 2b. cache-bust si --force ----------------------------------------
+# Sin esto, --force solo re-dispara el workflow pero el build en sí
+# reutiliza toda la cache de Buildx (cache-from: type=gha) si ASOBI_REF
+# y providers/*.erl no cambiaron - por eso "no cambia ningún layer".
+# Al tocar este archivo, el Dockerfile invalida la cache desde el COPY
+# de .rebuild-trigger en adelante (ver Dockerfile), forzando un rebuild
+# real del clone + providers + compile, sin desactivar la cache entera.
+REBUILD_TRIGGER=".rebuild-trigger"
+if [ "$FORCE_TAG" = true ]; then
+    date -u +"%Y-%m-%dT%H:%M:%SZ forzado por --force (v$VERSION)" > "$REBUILD_TRIGGER"
+    echo "==> --force: $REBUILD_TRIGGER actualizado para invalidar la cache de Docker."
+fi
+
 # --- 3. commit + push ------------------------------------------------------
 git add "$DOCKERFILE"
+[ "$FORCE_TAG" = true ] && git add "$REBUILD_TRIGGER"
+
+MSG="asobi: bump imagen a v$VERSION"
+[ "$FORCE_TAG" = true ] && MSG="$MSG (rebuild forzado)"
+
 if ! git diff --cached --quiet; then
-    git commit -m "asobi: bump imagen a v$VERSION"
+    git commit -m "$MSG"
     echo "==> Commit creado."
+else
+    echo "==> Sin cambios que commitear."
 fi
 
 echo "==> Push a origin/main..."
 git push origin main
 
 # --- 4. tag (dispara el workflow) ------------------------------------------
-echo "==> Push del tag asobi-v$VERSION (dispara 'Build image')..."
-if git tag "asobi-v$VERSION"; then
-    git push origin "asobi-v$VERSION"
+TAG="asobi-v$VERSION"
+
+if [ "$FORCE_TAG" = true ]; then
+    echo "==> --force: borrando tag $TAG (local y remoto) si existe..."
+    git tag -d "$TAG" 2>/dev/null && echo "    tag local borrado." || echo "    no había tag local."
+    if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "refs/tags/$TAG"; then
+        git push origin ":refs/tags/$TAG"
+        echo "    tag remoto borrado."
+    else
+        echo "    no había tag remoto."
+    fi
+fi
+
+echo "==> Push del tag $TAG (dispara 'Build image')..."
+if git tag "$TAG"; then
+    git push origin "$TAG"
 else
-    echo "El tag asobi-v$VERSION ya existía; no se re-disparó. Usa dispatch manual o borra/recréalo si lo necesitas."
+    if [ "$FORCE_TAG" = true ]; then
+        die "no se pudo recrear el tag $TAG tras borrarlo - revisa manualmente (git tag -l '$TAG'; git ls-remote --tags origin '$TAG')"
+    fi
+    echo "El tag $TAG ya existía; no se re-disparó. Usa --force para borrarlo y recrearlo apuntando al HEAD actual."
 fi
 
 # --- resumen ----------------------------------------------------------------

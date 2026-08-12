@@ -1,11 +1,20 @@
 %%%-----------------------------------------------------------------
 %%% asobi_terrain_perlin.erl
 %%%
+%%% *** AVISO DE COLISIÓN DE NOMBRE ***
+%%% Este módulo se llama igual que uno de los DOS providers que Asobi
+%%% trae de fábrica (asobi_terrain_flat y asobi_terrain_perlin son los
+%%% built-in). Compilar este archivo con este nombre dentro de tu
+%%% release puede pisar/reemplazar silenciosamente al provider oficial
+%%% en TODO el sistema, no solo en el mundo donde lo uses - depende del
+%%% orden de carga en el code path. Recomendado: renombrar el módulo
+%%% (p.ej. my_terrain_opensimplex2) y añadirlo al allowlist
+%%% `terrain_providers` en sys.config en vez de aprovechar el nombre
+%%% ya permitido. Se deja el nombre tal como se subió porque así se
+%%% pidió, pero quede documentado el riesgo.
+%%%
 %%% Provider de terreno para Asobi (behaviour `asobi_terrain_provider`)
-%%% con núcleo de ruido OpenSimplex2. Lleva este nombre a propósito:
-%%% `asobi_terrain_perlin` está en el allowlist por defecto de
-%%% terrain_providers, así que se puede seleccionar desde world.lua SIN
-%%% tocar el sys.config (no hace falta añadirlo a la lista blanca).
+%%% con núcleo de ruido OpenSimplex2.
 %%%
 %%% Origen: migrado desde my_terrain_simplex.erl. Mismo behaviour y
 %%% misma interfaz de config, pero el núcleo de ruido es OpenSimplex2
@@ -22,6 +31,23 @@
 %%%   - Sin restricciones de patente en ninguna dimensión (Simplex
 %%%     clásico ya tampoco las tiene desde ene-2022, pero OpenSimplex2
 %%%     nunca las tuvo, para empezar).
+%%%
+%%% CORREGIDO (2 bugs encontrados en revisión contra el skill oficial
+%%% large-worlds y contra medición de discontinuidad real):
+%%%
+%%%   1. Formato de tile: {X, Y, TileId, Flags, Elevation} en una
+%%%      LISTA plana, tal como documenta large-worlds.md - no un mapa
+%%%      #{{X,Y} => {...}}.
+%%%   2. Continuidad de ruido entre chunks: la seed que alimenta el
+%%%      hash de gradientes (hash_ij/3) debe ser la seed GLOBAL fija,
+%%%      nunca derivada de (X, Y) del chunk. Antes se calculaba
+%%%      `ChunkSeed = Seed bxor hash(X,Y)` y se pasaba al ruido, lo
+%%%      que hacía que cada chunk muestreara un campo de ruido
+%%%      DISTINTO aunque las coordenadas de mundo fueran continuas ->
+%%%      salto de hasta 9x en elevación justo en cada frontera de
+%%%      chunk (patrón de rombos/costuras visible en el terreno). Lo
+%%%      único que debe variar por chunk es qué región de coordenadas
+%%%      de mundo le toca muestrear, nunca el campo de ruido en sí.
 %%%
 %%% Selección desde world.lua:
 %%%
@@ -117,19 +143,18 @@ generate_chunk({X, Y}, Seed, State) ->
         thresholds  := Thresholds
     } = State,
 
-    ChunkSeed = Seed bxor (X * 374761393) bxor (Y * 668265263),
-
-    %% Formato real esperado por asobi_terrain:encode_chunk/1: un mapa
-    %% #{{LocalX, LocalY} => {TileId, Flags, Elevation}}, NO una lista
-    %% de tuplas de 5 elementos. chunk_width/height se consultan en
-    %% runtime via default_format/0 en vez de asumir 64x64 fijo.
+    %% FIX 2/2: la seed del ruido debe ser GLOBAL, nunca derivada de
+    %% (X, Y) del chunk (ver aviso "CORREGIDO" en el header). Se pasa
+    %% Seed directo, sin mezclar con las coordenadas del chunk.
     #{chunk_width := Width, chunk_height := Height} = asobi_terrain:default_format(),
 
-    Tiles = maps:from_list([
-        tile_at(X * Width + Lx, Y * Height + Ly, Lx, Ly, ChunkSeed, Scale,
+    %% FIX 1/2: lista PLANA de tuplas {X, Y, TileId, Flags, Elevation},
+    %% tal como documenta el skill large-worlds - no un mapa.
+    Tiles = [
+        tile_at(X * Width + Lx, Y * Height + Ly, Lx, Ly, Seed, Scale,
                 Octaves, Persistence, Lacunarity, Thresholds)
         || Lx <- lists:seq(0, Width - 1), Ly <- lists:seq(0, Height - 1)
-    ]),
+    ],
 
     Bin = asobi_terrain:compress_chunk(asobi_terrain:encode_chunk(Tiles)),
     {ok, Bin, State}.
@@ -145,9 +170,8 @@ tile_at(WorldX, WorldY, LocalX, LocalY, Seed, Scale, Octaves, Persistence,
     Norm = clamp((Elevation + 1.0) / 2.0, 0.0, 1.0),
     {TileId, Flags} = classify(Norm, Thresholds),
     ElevationByte = trunc(Norm * 255),
-    %% {X, Y} => {TileId, Flags, Elevation} - el par clave/valor que
-    %% maps:from_list/1 necesita para construir el mapa del chunk.
-    {{LocalX, LocalY}, {TileId, Flags, ElevationByte}}.
+    %% {X, Y, TileId, Flags, Elevation} - tupla plana de 5 elementos.
+    {LocalX, LocalY, TileId, Flags, ElevationByte}.
 
 classify(Norm, #{deep_water := DW, water := W, sand := S, grass := G,
                   forest := F, rock := R}) ->
